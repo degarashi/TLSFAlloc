@@ -1,7 +1,7 @@
 CC		= g++
 CPPFLAGS	= -masm=intel --std=c++0x -O0 -g
 PROGRAM		= tlsf
-SRC		= tlsf_test.cpp
+SRC		= $(wildcard *.cpp)
 OBJ		= $(patsubst %.cpp,%.o, $(SRC))
 DEPEND		= $(patsubst %.cpp,%.depend,$(SRC))
 

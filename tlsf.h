@@ -12,6 +12,7 @@ namespace rs {
 		virtual size_t getSegmentSize(void* p) const = 0;
 		virtual size_t LowFLevelSize() const = 0;
 		virtual size_t LowBlockSize() const = 0;
+		virtual void destroy() = 0;
 	};
 	#ifdef MSVC
 		#pragma pack(push,1)
@@ -276,7 +277,7 @@ namespace rs {
 				}
 				return blk->payload();
 			}
-
+		public:
 			static MBlk* _ptrToBlock(void* p) {
 				return reinterpret_cast<MBlk*>((intptr_t)p - sizeof(MBlk));
 			}
@@ -316,6 +317,9 @@ namespace rs {
 				// 最初のブロックを追加
 				_sz_remain = 0;
 				_pushMB(r_src, r_sz);
+			}
+			virtual void destroy() {
+				delete this;
 			}
 			// 確保メモリサイズの変更
 			void* reacquire(void* p, size_t s) {
@@ -380,6 +384,10 @@ namespace rs {
 
 					// 新しくブロックを確保してコピー
 					void* np = acquire(s);
+					// もし新しく領域を確保できなかったらnullを返す
+					if(!np)
+						return nullptr;
+
 					memcpy(np, p, std::min(cur_s,s));
 					release(p);
 					return np;
@@ -548,6 +556,7 @@ namespace rs {
 			size_t getSegmentSize(void* p) const { return 0; }
 			size_t LowFLevelSize() const { return 0; }
 			size_t LowBlockSize() const { return 0; }
+			virtual void destroy() { delete this; }
 	};
 	// 指定されたメモリ領域(最大1<<NMemBit-1)を内部でnew確保，解放
 	template <int NMemBit, int NBit0, int NBit1, bool BExc>
@@ -560,7 +569,10 @@ namespace rs {
 
 			TLSFNew(size_t sz=size_t(1<<NMemBit)-1):
 				_TLSF(_pBuff=new u8[std::min(sz,size_t(1<<NMemBit)-1)], std::min(sz,size_t(1<<NMemBit)-1)) {}
-			virtual ~TLSFNew() { delete[] _pBuff; }
+			virtual void destroy() {
+				delete[] _pBuff;
+				_TLSF::destroy();
+			}
 	};
 
 	// 複数の内部TLSFアロケータを持ち，必要に応じて一定量ずつ追加でメモリ領域を確保
@@ -604,12 +616,13 @@ namespace rs {
 				_szAlc = 4;
 				_nAlc = 1;
 			}
-			virtual ~TLSFBlock() {
+			virtual void destroy() {
 				// (topのTLSFはリストを含んでいる為，最後にする)
 				for(int i=1 ; i<_nAlc ; i++)
 					delete _alcList[i].second;
 				_top->release(_alcList);
 				delete _top;
+				delete this;
 			}
 
 			 void* acquire(size_t s) {
@@ -630,7 +643,17 @@ namespace rs {
 				_alcList[_witchMem(p)].second->release(p);
 			}
 			void* reacquire(void* p, size_t s) {
-				return _alcList[_witchMem(p)].second->reacquire(p, s);
+				// サイズが大きくなる場合，同じアロケータでは確保できない可能性がある
+				auto* pTls = _alcList[_witchMem(p)].second;
+				void* ret = pTls->reacquire(p, s);
+				if(!ret) {
+					// 別アロケータから確保し，コピー
+					ret = acquire(s);
+					auto* blk = pTls->_ptrToBlock(p);
+					memcpy(ret, blk->payload(), blk->getPayloadSize());
+					release(p);
+				}
+				return ret;
 			}
 			size_t getRemainMem() const {
 				size_t count = 0;
